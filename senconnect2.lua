@@ -35,6 +35,15 @@ do
         simulator:setInputBool(1, simulator:getIsToggled(1))      -- enabled
 
         -- pseudo receiver
+        if simulator:getIsToggled(2) then
+            simulator:setInputBool(1, true) -- alive
+            simulator:setInputNumber(1, 1522) -- group ID
+            simulator:setInputNumber(2, 150 + math.floor(simulator:getSlider(3) * 50)) -- transmitter freq
+        else
+            simulator:setInputBool(1, false) -- alive
+            simulator:setInputNumber(1, 0) -- group ID
+            simulator:setInputNumber(2, 0) -- transmitter freq
+        end
     end;
 end
 ---@endsection
@@ -52,7 +61,7 @@ local playerTimeout = property.getNumber("Player Timeout (num refreshes)")
 local scannerFreq = 100
 local maxFreq = 200
 local transmitterFreq = 0
-local ready = false
+local currentPlayerIndex = 1
 
 local mapColors = { -- From SenCar
     { 47, 51, 78 },
@@ -69,15 +78,25 @@ local mapProperties = {
     y = 0,
     zoom = 1,
     heading = 0,
+    colorIndex = 1,
     color = mapColors[1]
 }
+
+-- each entry is a table with x, y, heading, color
+local playerData = {}
+local mapPlayerData = {}
 
 local playerFreqs = {}
 local startupFoundFreqs = {}
 
-local rollingScannerFreqs = {}
-
 local function contains(t, v)
+    if type(v) == "table" then
+        for _, value in pairs(t) do
+            if type(value) == "table" and value[1] == v[1] and value[2] == v[2] and value[3] == v[3] and value[4] == v[4] then
+                return true
+            end
+        end
+    end
     for _, value in pairs(t) do
         if value == v then return true end
     end
@@ -85,20 +104,19 @@ local function contains(t, v)
 end
 
 local ticks = 0
+local state = 0 -- 0 = unready 1 = starting 2 = ready 3 = scanning for players 4 = looping players
 
 function onTick()
-    if ticks < 5 then
-        ticks = ticks + 1
-    end
+    ticks = ticks + 1
     local enabled = not input.getBool(2)
 
     -- select frequency if not ready by scanning through all frequencies,
     -- noting whats taken, and then picking an open one once the scanner
     -- has gone through them all
-    if ticks >= 5 and not ready and enabled then
+    if ticks >= 5 and (state == 0 or state == 1) and enabled then
+        state = 1
         if input.getBool(1) then -- found
-            local datedScannerFreq = rollingScannerFreqs[1] or 100
-            local f = datedScannerFreq
+            local f = input.getNumber(2) -- transmitter freq of the found signal
             if f ~= 0 and not contains(startupFoundFreqs, f) then
                 startupFoundFreqs[#startupFoundFreqs + 1] = f
             end
@@ -117,55 +135,135 @@ function onTick()
             end
 
             transmitterFreq = freq
-            ready = true
+            state = 2 -- ready
+            scannerFreq = 95 -- Go a few lower to give some time before the first scan starts at 100
         end
     end
 
     -- map inputs and such
-    output.setNumber(1, #startupFoundFreqs)
-    output.setNumber(28, scannerFreq)
-    output.setNumber(29, transmitterFreq)
-    output.setBool(1, ready)
-    rollingScannerFreqs[#rollingScannerFreqs + 1] = scannerFreq
-    if #rollingScannerFreqs > 6 then table.remove(rollingScannerFreqs, 1) end
     if not enabled then
         scannerFreq = 100
         transmitterFreq = 0
-        ready = false
+        state = 0
         startupFoundFreqs = {}
         playerFreqs = {}
-        return
     end
 
     local zoom = input.getNumber(31)
-    if zoom ~= 0 then mapProperties.zoom = zoom else mapProperties.zoom = 1 end
+    if zoom ~= 0 then mapProperties.zoom = zoom else mapProperties.zoom = 0.01 end
 
-    local px, py, ph, c = input.getNumber(28), input.getNumber(29), input.getNumber(30)*(math.pi*2)*-1, input.getNumber(32)
-    if c ~= 0 then mapProperties.color = mapColors[math.floor(c) % #mapColors + 1] end
+    local px, py, ph, col = input.getNumber(28), input.getNumber(29), input.getNumber(30)*(math.pi*2)*-1, input.getNumber(32)
+    if col ~= 0 then
+        mapProperties.colorIndex = math.floor(col) % #mapColors + 1
+        mapProperties.color = mapColors[mapProperties.colorIndex]
+    end
     if px ~= 0 and py ~= 0 and ph ~= 0 then
         mapProperties.x = px
         mapProperties.y = py
         mapProperties.heading = ph
     end
 
-    -- get inputs from the receiver
-    -- important to note the receiver is scanning frequencies set several ticks ago (5 tick to be precise)
-    local alive = input.getBool(1)
-    local rgroupID = input.getNumber(1)
-    if alive and rgroupID == groupID then
-        playerFreqs[#playerFreqs + 1] = rollingScannerFreqs[1]
+    -- loop through all frequencies to see where players exist and note their transmitter freqs
+    if state == 2 or state == 3 then
+        playerData = {}
+        currentPlayerIndex = 1
+        state = 3 -- scanning for players
+        
+        local alive = input.getBool(1)
+        local incomingTransmitterFreq = input.getNumber(2)
+        if alive and incomingTransmitterFreq ~= transmitterFreq then
+            local rgroupID = input.getNumber(1)
+            
+            if rgroupID == groupID then
+                playerFreqs[#playerFreqs + 1] = incomingTransmitterFreq -- transmitter freq of the found signal
+            end
+        end
+        
+        scannerFreq = scannerFreq + 1
+        if scannerFreq >= 206 then
+            currentPlayerIndex = 1
+            state = 4 -- looping players
+        end
+    end
+
+    if state == 4 then
+        -- loop over known players and log their info
+        if #playerFreqs == 0 then
+            currentPlayerIndex = 1
+            scannerFreq = 100
+            state = 3 -- no players found, go back to scanning
+        elseif ticks % refreshInterval == 0 then
+            scannerFreq = 100
+            playerFreqs = {}
+            currentPlayerIndex = 1
+            state = 3 -- go back to scanning
+        else
+            local playerIndex = currentPlayerIndex
+            scannerFreq = playerFreqs[playerIndex]
+            if input.getBool(1) and not contains(playerData, playerIndex) then
+                newPlayer = {
+                    x = input.getNumber(3),
+                    y = input.getNumber(4),
+                    heading = input.getNumber(5),
+                    color = input.getNumber(6)
+                }
+                if not contains(playerData, newPlayer) then
+                    playerData[playerIndex] = newPlayer
+                end
+            end
+
+            currentPlayerIndex = currentPlayerIndex + 1
+            if currentPlayerIndex > #playerFreqs then
+                currentPlayerIndex = 1
+                if #playerData > 0 then
+                    mapPlayerData = playerData -- publish complete data only after one full loop through known players
+                end
+            end
+        end
+    end
+
+    -- local outputs
+    output.setNumber(28, scannerFreq)
+    output.setNumber(29, transmitterFreq)
+
+    -- transmitter outputs
+    output.setNumber(1, groupID)
+    output.setNumber(2, transmitterFreq)
+    output.setNumber(3, mapProperties.x)
+    output.setNumber(4, mapProperties.y)
+    output.setNumber(5, mapProperties.heading)
+    output.setNumber(6, mapProperties.colorIndex or 1)
+
+
+    output.setBool(1, state > 1)
+
+    output.setNumber(31, state)
+    output.setNumber(32, #mapPlayerData)
+
+    if scannerFreq > 300 then
+        scannerFreq = 100
     end
 end
 
 function onDraw()
     local w, h = screen.getWidth(), screen.getHeight()
     screen.drawMap(mapProperties.x, mapProperties.y, mapProperties.zoom)
-    screen.setColor(mapProperties.color[1], mapProperties.color[2], mapProperties.color[3])
-    drawPointer(w / 2, h / 2, 8, mapProperties.heading)
-    
-    for _, f in pairs(startupFoundFreqs) do
-        screen.drawText(0, _ * 7, f)
+
+    -- draw other players first so our pointer gets overlaid on top
+    for _, player in pairs(mapPlayerData) do
+        if player ~= nil then
+            c(
+                mapColors[player.color % #mapColors + 1][1],
+                mapColors[player.color % #mapColors + 1][2],
+                mapColors[player.color % #mapColors + 1][3]
+            )
+            local px, py = map.mapToScreen(mapProperties.x, mapProperties.y, mapProperties.zoom, w, h, player.x, player.y)
+            drawPointer(px, py, 6, player.heading)
+        end
     end
+
+    c(mapProperties.color[1], mapProperties.color[2], mapProperties.color[3])
+    drawPointer(w / 2, h / 2, 8, mapProperties.heading)
 end
 
 function drawPointer(x,y,s,r,...)
@@ -175,4 +273,12 @@ function drawPointer(x,y,s,r,...)
 	y=y-s/2*math.cos(r)
 
 	screen.drawTriangleF(x,y,x-s*math.sin(r+a),y+s*math.cos(r+a),x-s*math.sin(r-a),y+s*math.cos(r-a))
+end
+
+function c(...)
+    local _ = { ... }
+    for i, v in pairs(_) do
+        _[i] = _[i] ^ 2.2 / 255 ^ 2.2 * _[i]
+    end
+    screen.setColor(table.unpack(_))
 end
