@@ -29,3 +29,6 @@ Numbers:
 7-25. Vehicle name (Ints, ASCII (30..39, 65..90), 2 chars/channel)
 
 26-32. Inop.
+
+## Current Limitations
+- Colors can only be one of a few values set from an integer. These colors are the Bright colors from any of the selectable SenCar 6 theme colors. This means variable colors are currently not supported.

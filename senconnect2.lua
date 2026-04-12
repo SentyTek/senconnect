@@ -58,19 +58,20 @@ local groupID = property.getNumber("Group ID")
 local refreshInterval = property.getNumber("Refresh Interval (sec)") * 60
 local playerTimeout = property.getNumber("Player Timeout (num refreshes)")
 
-local scannerFreq = 100
+local startingFreq = 95
+local scannerFreq = startingFreq
 local maxFreq = 200
 local transmitterFreq = 0
 local currentPlayerIndex = 1
 
 local mapColors = { -- From SenCar
-    { 47, 51, 78 },
-    { 17, 15, 107 },
-    { 74, 27, 99 },
-    { 35, 54, 41 },
-    { 69, 1,  10 },
-    { 38, 38, 38 },
-    { 92, 50, 1 }
+    { 128, 95, 164  },
+    { 48, 208, 217 },
+    { 182, 29, 224 },
+    { 12, 133, 26 },
+    { 160, 9, 9 },
+    { 140, 140, 140 },
+    { 201, 119, 24 }
 }
 
 local mapProperties = {
@@ -103,12 +104,17 @@ local function contains(t, v)
     return false
 end
 
+local function toColorIndex(value)
+    return (math.floor((value and (value > 0 and value or 1) or 1)) % #mapColors)
+end
+
 local ticks = 0
 local state = 0 -- 0 = unready 1 = starting 2 = ready 3 = scanning for players 4 = looping players
 
 function onTick()
     ticks = ticks + 1
     local enabled = not input.getBool(2)
+    local enteredLoopState = false
 
     -- select frequency if not ready by scanning through all frequencies,
     -- noting whats taken, and then picking an open one once the scanner
@@ -123,7 +129,7 @@ function onTick()
         end
         scannerFreq = scannerFreq + 1
 
-        if scannerFreq >= 200 then
+        if scannerFreq >= 206 then
             -- select from the open frequencies
             -- min freq is 100, max is 200
             local freq = 100
@@ -136,13 +142,13 @@ function onTick()
 
             transmitterFreq = freq
             state = 2 -- ready
-            scannerFreq = 95 -- Go a few lower to give some time before the first scan starts at 100
+            scannerFreq = startingFreq -- Go a few lower to give some time before the first scan starts at 100
         end
     end
 
     -- map inputs and such
     if not enabled then
-        scannerFreq = 100
+        scannerFreq = startingFreq
         transmitterFreq = 0
         state = 0
         startupFoundFreqs = {}
@@ -154,7 +160,7 @@ function onTick()
 
     local px, py, ph, col = input.getNumber(28), input.getNumber(29), input.getNumber(30)*(math.pi*2)*-1, input.getNumber(32)
     if col ~= 0 then
-        mapProperties.colorIndex = math.floor(col) % #mapColors + 1
+        mapProperties.colorIndex = toColorIndex(col)
         mapProperties.color = mapColors[mapProperties.colorIndex]
     end
     if px ~= 0 and py ~= 0 and ph ~= 0 then
@@ -174,7 +180,7 @@ function onTick()
         if alive and incomingTransmitterFreq ~= transmitterFreq then
             local rgroupID = input.getNumber(1)
             
-            if rgroupID == groupID then
+            if rgroupID == groupID and not contains(playerFreqs, incomingTransmitterFreq) then
                 playerFreqs[#playerFreqs + 1] = incomingTransmitterFreq -- transmitter freq of the found signal
             end
         end
@@ -183,44 +189,44 @@ function onTick()
         if scannerFreq >= 206 then
             currentPlayerIndex = 1
             state = 4 -- looping players
+            enteredLoopState = true
         end
     end
 
-    if state == 4 then
+    if state == 4 and not enteredLoopState then
         -- loop over known players and log their info
         if #playerFreqs == 0 then
             currentPlayerIndex = 1
-            scannerFreq = 100
+            scannerFreq = startingFreq
             state = 3 -- no players found, go back to scanning
         elseif ticks % refreshInterval == 0 then
-            scannerFreq = 100
+            scannerFreq = startingFreq
             playerFreqs = {}
             currentPlayerIndex = 1
             state = 3 -- go back to scanning
         else
             local playerIndex = currentPlayerIndex
             scannerFreq = playerFreqs[playerIndex]
-            if input.getBool(1) and not contains(playerData, playerIndex) then
-                newPlayer = {
+
+            if input.getBool(1) then
+                playerData[playerIndex] = {
                     x = input.getNumber(3),
                     y = input.getNumber(4),
                     heading = input.getNumber(5),
                     color = input.getNumber(6)
                 }
-                if not contains(playerData, newPlayer) then
-                    playerData[playerIndex] = newPlayer
-                end
             end
 
             currentPlayerIndex = currentPlayerIndex + 1
             if currentPlayerIndex > #playerFreqs then
                 currentPlayerIndex = 1
-                if #playerData > 0 then
-                    mapPlayerData = playerData -- publish complete data only after one full loop through known players
+                if next(playerData) ~= nil then
+                    mapPlayerData = playerData -- publish complete non-empty data after one full pass
                 end
             end
         end
     end
+
 
     -- local outputs
     output.setNumber(28, scannerFreq)
@@ -238,10 +244,10 @@ function onTick()
     output.setBool(1, state > 1)
 
     output.setNumber(31, state)
-    output.setNumber(32, #mapPlayerData)
+    output.setNumber(32, #playerData)
 
     if scannerFreq > 300 then
-        scannerFreq = 100
+        scannerFreq = startingFreq
     end
 end
 
@@ -252,10 +258,11 @@ function onDraw()
     -- draw other players first so our pointer gets overlaid on top
     for _, player in pairs(mapPlayerData) do
         if player ~= nil then
+            local playerColor = mapColors[toColorIndex(player.color)] or mapColors[1]
             c(
-                mapColors[player.color % #mapColors + 1][1],
-                mapColors[player.color % #mapColors + 1][2],
-                mapColors[player.color % #mapColors + 1][3]
+                playerColor[1],
+                playerColor[2],
+                playerColor[3]
             )
             local px, py = map.mapToScreen(mapProperties.x, mapProperties.y, mapProperties.zoom, w, h, player.x, player.y)
             drawPointer(px, py, 6, player.heading)
