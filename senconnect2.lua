@@ -20,6 +20,7 @@ do
     simulator:setProperty("Refresh Interval (sec)", 3)
     simulator:setProperty("Player Timeout (num refreshes)", 2)
     simulator:setProperty("Unit Name", "Aita")
+    simulator:setProperty("Sweep Step", 2)
 
     -- Runs every tick just before onTick; allows you to simulate the inputs changing
     ---@param simulator Simulator Use simulator:<function>() to set inputs etc.
@@ -70,6 +71,7 @@ local groupID = property.getNumber("Group ID")
 local refreshInterval = math.max(60, property.getNumber("Refresh Interval (sec)") * 60)
 local playerTimeout = math.max(0, math.floor(property.getNumber("Player Timeout (num refreshes)")))
 local unitName = property.getText("Unit Name"):upper()
+local sweepStep = math.max(1, math.floor(property.getNumber("Sweep Step")))
 
 local bytes = {}
 local startChannelName = 7
@@ -80,8 +82,8 @@ for i = 1, math.min(#unitName, 36) do
 end
 
 local startingFreq = 95
+local maxFreq = 206
 local scannerFreq = startingFreq
-local maxFreq = 200
 local transmitterFreq = 0
 local currentPlayerIndex = 1
 
@@ -105,7 +107,6 @@ local mapProperties = {
 }
 
 -- each entry is a table with x, y, heading, color
-local playerData = {}
 local mapPlayerData = {}
 local trackedPlayers = {} -- keyed by transmitter frequency, persists across refresh scans
 
@@ -127,12 +128,24 @@ local function contains(t, v)
 end
 
 local function toColorIndex(value)
-    return (math.floor((value and (value > 0 and value or 1) or 1)) % #mapColors)
+    return (math.floor((value and (value > 0 and value or 1) or 1)) % (#mapColors + 1))
 end
 
 local ticks = 0
 local state = 0 -- 0 = unready 1 = starting 2 = ready 3 = scanning for players 4 = looping players
 local touchX, touchY, ltouchX, ltouchY, ticksSinceTouch = 0, 0, 0, 0, 0
+local sweepOffset = 0 -- current offset in sweep pattern (0 to sweepStep-1), rotates through all offsets
+
+local function getSweepStartFreq()
+    local startFreq = startingFreq
+    local remainder = startFreq % sweepStep
+    local needed = (sweepOffset - remainder) % sweepStep
+    return startFreq + needed
+end
+
+local function clamp(v, m, n)
+    return math.max(m, math.min(n, v))
+end
 
 local function txName()
     -- translates string to bytes and sends over outputs
@@ -184,7 +197,7 @@ function onTick()
         end
         scannerFreq = scannerFreq + 1
 
-        if scannerFreq >= 206 then
+        if scannerFreq >= maxFreq then
             -- select a random frequency from the open ones
             local freq = math.random(startingFreq, maxFreq)
             while contains(startupFoundFreqs, freq) do
@@ -204,18 +217,18 @@ function onTick()
         state = 0
         startupFoundFreqs = {}
         playerFreqs = {}
-        playerData = {}
         mapPlayerData = {}
         trackedPlayers = {}
+        sweepOffset = 0
     end
 
     local zoom = input.getNumber(31)
-    if zoom ~= 0 then mapProperties.zoom = zoom else mapProperties.zoom = 0.01 end
+    if zoom ~= 0 then mapProperties.zoom = zoom else mapProperties.zoom = 1 end
 
-    local px, py, ph, col = input.getNumber(28), input.getNumber(29), input.getNumber(30)*(math.pi*2)*-1, input.getNumber(32)
+    local px, py, ph, col = input.getNumber(28), input.getNumber(29), input.getNumber(30)*(math.pi*2)*-1, clamp(input.getNumber(32), 1, 7)
     if col ~= 0 then
         mapProperties.colorIndex = toColorIndex(col)
-        mapProperties.color = mapColors[mapProperties.colorIndex]
+        mapProperties.color = mapColors[mapProperties.colorIndex] or mapColors[1]
     end
     if px ~= 0 and py ~= 0 and ph ~= 0 then
         mapProperties.x = px
@@ -227,7 +240,9 @@ function onTick()
 
     -- loop through all frequencies to see where players exist and note their transmitter freqs
     if state == 2 or state == 3 then
-        playerData = {}
+        if state == 2 then
+            scannerFreq = getSweepStartFreq()
+        end
         currentPlayerIndex = 1
         state = 3 -- scanning for players
 
@@ -241,8 +256,8 @@ function onTick()
             end
         end
 
-        scannerFreq = scannerFreq + 1
-        if scannerFreq >= 206 then
+        scannerFreq = scannerFreq + sweepStep
+        if scannerFreq >= maxFreq then
             local detectedThisRefresh = {}
             for _, freq in pairs(playerFreqs) do
                 detectedThisRefresh[freq] = true
@@ -268,6 +283,7 @@ function onTick()
             mapPlayerData = trackedPlayers
             currentPlayerIndex = 1
             state = 4 -- looping players
+            sweepOffset = (sweepOffset + 1) % sweepStep
             enteredLoopState = true
         end
     end
@@ -276,10 +292,10 @@ function onTick()
         -- loop over known players and log their info
         if #playerFreqs == 0 then
             currentPlayerIndex = 1
-            scannerFreq = startingFreq
+            scannerFreq = getSweepStartFreq()
             state = 3 -- no players found, go back to scanning
-        elseif ticks % refreshInterval == 0 then
-            scannerFreq = startingFreq
+        elseif ticks % refreshInterval == 0 and sweepOffset == 0 then
+            scannerFreq = getSweepStartFreq()
             playerFreqs = {}
             currentPlayerIndex = 1
             state = 3 -- go back to scanning
@@ -296,14 +312,6 @@ function onTick()
                 trackedPlayers[playerFreq].heading = input.getNumber(5)
                 trackedPlayers[playerFreq].color = input.getNumber(6)
                 trackedPlayers[playerFreq].name = rxName()
-
-                playerData[playerIndex] = {
-                    x = input.getNumber(3),
-                    y = input.getNumber(4),
-                    heading = input.getNumber(5),
-                    color = input.getNumber(6),
-                    name = rxName()
-                }
             end
 
             currentPlayerIndex = currentPlayerIndex + 1
@@ -324,7 +332,7 @@ function onTick()
     output.setNumber(3, mapProperties.x)
     output.setNumber(4, mapProperties.y)
     output.setNumber(5, mapProperties.heading)
-    output.setNumber(6, mapProperties.colorIndex or 1)
+    output.setNumber(6, clamp(mapProperties.colorIndex or 1, 1, 7))
 
     txName()
 
@@ -333,7 +341,7 @@ function onTick()
     ticksSinceTouch = (touchX ~= ltouchX or touchY ~= ltouchY) and 0 or ticksSinceTouch + 1
     ltouchX, ltouchY = touchX, touchY
 
-    if scannerFreq > 300 then
+    if scannerFreq > maxFreq + 100 then
         scannerFreq = startingFreq
     end
 end
@@ -354,14 +362,14 @@ function onDraw()
             )
             local px, py = map.mapToScreen(mapProperties.x, mapProperties.y, mapProperties.zoom, w, h, player.x, player.y)
             drawPointer(px, py, 6, player.heading)
-
+            
             -- create small touch zones for each player to display their name on the screen when touched
             if ticksSinceTouch < 300 and isPointInRectangle(px - 2, py - 4, 4, 4) then
                 nameToDisplay = { x = px + 2, y = py - 4, name = player.name or "" }
             end
         end
     end
-
+    
     c(mapProperties.color[1], mapProperties.color[2], mapProperties.color[3])
     drawPointer(w / 2, h / 2, 8, mapProperties.heading)
     c(255, 255, 255)
