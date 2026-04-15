@@ -55,8 +55,8 @@ end
 -- the "LifeBoatAPI" is included by default in /_build/libs/ - you can use require("LifeBoatAPI") to get this, and use all the LifeBoatAPI.<functions>!
 
 local groupID = property.getNumber("Group ID")
-local refreshInterval = property.getNumber("Refresh Interval (sec)") * 60
-local playerTimeout = property.getNumber("Player Timeout (num refreshes)")
+local refreshInterval = math.max(60, property.getNumber("Refresh Interval (sec)") * 60)
+local playerTimeout = math.max(0, math.floor(property.getNumber("Player Timeout (num refreshes)")))
 
 local startingFreq = 95
 local scannerFreq = startingFreq
@@ -86,6 +86,7 @@ local mapProperties = {
 -- each entry is a table with x, y, heading, color
 local playerData = {}
 local mapPlayerData = {}
+local trackedPlayers = {} -- keyed by transmitter frequency, persists across refresh scans
 
 local playerFreqs = {}
 local startupFoundFreqs = {}
@@ -130,16 +131,12 @@ function onTick()
         scannerFreq = scannerFreq + 1
 
         if scannerFreq >= 206 then
-            -- select from the open frequencies
-            -- min freq is 100, max is 200
-            local freq = 100
-            while freq <= maxFreq do
-                if not contains(startupFoundFreqs, freq) then
-                    break
-                end
-                freq = freq + 1
+            -- select a random frequency from the open ones
+            local freq = math.random(startingFreq, maxFreq)
+            while contains(startupFoundFreqs, freq) do
+                freq = math.random(startingFreq, maxFreq)
             end
-
+            
             transmitterFreq = freq
             state = 2 -- ready
             scannerFreq = startingFreq -- Go a few lower to give some time before the first scan starts at 100
@@ -153,6 +150,9 @@ function onTick()
         state = 0
         startupFoundFreqs = {}
         playerFreqs = {}
+        playerData = {}
+        mapPlayerData = {}
+        trackedPlayers = {}
     end
 
     local zoom = input.getNumber(31)
@@ -187,6 +187,29 @@ function onTick()
         
         scannerFreq = scannerFreq + 1
         if scannerFreq >= 206 then
+            local detectedThisRefresh = {}
+            for _, freq in pairs(playerFreqs) do
+                detectedThisRefresh[freq] = true
+            end
+
+            for freq, trackedPlayer in pairs(trackedPlayers) do
+                if detectedThisRefresh[freq] then
+                    trackedPlayer.missedRefreshes = 0
+                else
+                    trackedPlayer.missedRefreshes = (trackedPlayer.missedRefreshes or 0) + 1
+                    if trackedPlayer.missedRefreshes >= playerTimeout then
+                        trackedPlayers[freq] = nil
+                    end
+                end
+            end
+
+            for _, freq in pairs(playerFreqs) do
+                if trackedPlayers[freq] == nil then
+                    trackedPlayers[freq] = { missedRefreshes = 0 }
+                end
+            end
+
+            mapPlayerData = trackedPlayers
             currentPlayerIndex = 1
             state = 4 -- looping players
             enteredLoopState = true
@@ -206,9 +229,16 @@ function onTick()
             state = 3 -- go back to scanning
         else
             local playerIndex = currentPlayerIndex
-            scannerFreq = playerFreqs[playerIndex]
+            local playerFreq = playerFreqs[playerIndex]
+            scannerFreq = playerFreq
 
             if input.getBool(1) then
+                trackedPlayers[playerFreq] = trackedPlayers[playerFreq] or { missedRefreshes = 0 }
+                trackedPlayers[playerFreq].x = input.getNumber(3)
+                trackedPlayers[playerFreq].y = input.getNumber(4)
+                trackedPlayers[playerFreq].heading = input.getNumber(5)
+                trackedPlayers[playerFreq].color = input.getNumber(6)
+
                 playerData[playerIndex] = {
                     x = input.getNumber(3),
                     y = input.getNumber(4),
@@ -220,9 +250,7 @@ function onTick()
             currentPlayerIndex = currentPlayerIndex + 1
             if currentPlayerIndex > #playerFreqs then
                 currentPlayerIndex = 1
-                if next(playerData) ~= nil then
-                    mapPlayerData = playerData -- publish complete non-empty data after one full pass
-                end
+                mapPlayerData = trackedPlayers
             end
         end
     end
@@ -239,8 +267,7 @@ function onTick()
     output.setNumber(4, mapProperties.y)
     output.setNumber(5, mapProperties.heading)
     output.setNumber(6, mapProperties.colorIndex or 1)
-
-
+    
     output.setBool(1, state > 1)
 
     output.setNumber(31, state)
@@ -257,7 +284,7 @@ function onDraw()
 
     -- draw other players first so our pointer gets overlaid on top
     for _, player in pairs(mapPlayerData) do
-        if player ~= nil then
+        if player ~= nil and player.x ~= nil and player.y ~= nil and player.heading ~= nil and player.color ~= nil then
             local playerColor = mapColors[toColorIndex(player.color)] or mapColors[1]
             c(
                 playerColor[1],
