@@ -294,9 +294,11 @@ function onTick()
             currentPlayerIndex = 1
             scannerFreq = getSweepStartFreq()
             state = 3 -- no players found, go back to scanning
-        elseif ticks % refreshInterval == 0 and sweepOffset == 0 then
+        elseif ticks % refreshInterval == 0 then
             scannerFreq = getSweepStartFreq()
-            playerFreqs = {}
+            if sweepOffset == 0 then
+                playerFreqs = {}
+            end
             currentPlayerIndex = 1
             state = 3 -- go back to scanning
         else
